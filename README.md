@@ -2,7 +2,7 @@
 
 SQLite over RPC for distributed Elixir/Phoenix applications.
 
-ClusterLite is an Ecto adapter that lets Phoenix apps use SQLite databases hosted on remote nodes in a cluster. SQLite NIF references are local to a BEAM instance and can't cross node boundaries — ClusterLite solves this by running a GenServer on the remote node that owns the NIF references, with a local DBConnection adapter that proxies operations via `:rpc.call/4`.
+ClusterLite is an Ecto adapter that lets Phoenix apps use SQLite databases hosted on remote nodes in a cluster. SQLite NIF references are local to a BEAM instance and can't cross node boundaries — ClusterLite solves this by running a GenServer on the remote node that wraps an Exqlite DBConnection pool, with a local DBConnection adapter that proxies operations via `:rpc.call/4`.
 
 ## Architecture
 
@@ -19,15 +19,15 @@ Local Node (Phoenix app)                    Remote Node (SQLite files)
 │ ClusterLite.DynamicRepos│                │ ClusterLite.Remote       │
 │  (manages many repos)   │                │   .DbServer (GenServer)  │
 │                         │                │     ↓                    │
-│                         │                │ Exqlite.Sqlite3 (NIFs)   │
+│                         │                │ DBConnection/Exqlite     │
 └─────────────────────────┘                └──────────────────────────┘
 ```
 
 ## How it works
 
-- **Remote side**: A `DbServer` GenServer opens the SQLite database via exqlite and owns all NIF references. Prepared statements get integer IDs so nothing non-serializable crosses the wire.
-- **Local side**: A `DBConnection` adapter translates Ecto operations into RPC calls to the remote `DbServer`. One connection = one GenServer = correct for SQLite's single-writer model.
-- **SQL generation**: Delegates entirely to `ecto_sqlite3`'s Connection module, reusing its 2000+ lines of tested SQLite dialect code.
+- **Remote side**: A `DbServer` GenServer wraps an Exqlite DBConnection pool (pool_size: 1). All queries go through this GenServer, which serializes access and keeps NIF references contained. The entire RPC API is 4 functions: `start_db`, `stop_db`, `ping`, `query`.
+- **Local side**: A `DBConnection` adapter translates Ecto operations into RPC `query` calls. One local connection = one remote GenServer = correct for SQLite's single-writer model.
+- **SQL generation**: Delegates entirely to `ecto_sqlite3`'s Connection module, reusing its tested SQLite dialect code.
 - **Dynamic repos**: Create many SQLite databases on the fly, each with its own Ecto repo, potentially on different nodes.
 
 ## Usage
@@ -64,8 +64,8 @@ Works locally too — when `cluster_lite_node` is omitted or set to `node()`, RP
 
 ## Design decisions
 
+- **Wraps Exqlite, doesn't reimplement it** — the remote DbServer delegates to a real Exqlite DBConnection pool for pragma application, statement lifecycle, and result building
 - **Single GenServer per database** — SQLite is single-writer; serializing through one GenServer matches its semantics
-- **Integer stmt_ids instead of NIF refs** — prepared statements get integer IDs on the remote side; only serializable data crosses node boundaries
-- **pool_size: 1 default** — one DBConnection maps to one remote GenServer, correct for SQLite
+- **pool_size: 1 default** — one DBConnection locally maps to one remote GenServer, correct for SQLite
 - **All RPC via MFA tuples** — safe for distributed Erlang, no closures cross the wire
 - **No auto-reconnect** — on remote node disconnect, the connection errors; caller must restart the repo
