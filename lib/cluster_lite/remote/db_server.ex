@@ -73,7 +73,7 @@ defmodule ClusterLite.Remote.DbServer do
   end
 
   def handle_call(:changes, _from, state) do
-    {:reply, {:ok, Sqlite3.changes(state.db)}, state}
+    {:reply, Sqlite3.changes(state.db), state}
   end
 
   def handle_call({:prepare, sql}, _from, state) do

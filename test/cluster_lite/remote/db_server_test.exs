@@ -63,7 +63,7 @@ defmodule ClusterLite.Remote.DbServerTest do
     :ok = GenServer.call(pid, {:rollback, nil})
     assert :idle = GenServer.call(pid, :transaction_status)
 
-    {:ok, _sid, _cols, rows} = GenServer.call(pid, {:prepare_and_execute, "SELECT val FROM t", []})
+    {:ok, _sid, _cols, rows, _changes} = GenServer.call(pid, {:prepare_and_execute, "SELECT val FROM t", []})
     assert rows == [["a"]]
   end
 

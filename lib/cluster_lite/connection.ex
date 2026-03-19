@@ -93,7 +93,7 @@ defmodule ClusterLite.Connection do
         result = %Result{
           command: command,
           columns: columns,
-          rows: rows,
+          rows: normalize_rows(columns, rows),
           num_rows: num_rows(command, rows, changes)
         }
 
@@ -112,7 +112,7 @@ defmodule ClusterLite.Connection do
         result = %Result{
           command: command,
           columns: columns,
-          rows: rows,
+          rows: normalize_rows(columns, rows),
           num_rows: num_rows(command, rows, changes)
         }
 
@@ -244,4 +244,7 @@ defmodule ClusterLite.Connection do
        do: changes
 
   defp num_rows(_command, rows, _changes), do: length(rows)
+
+  defp normalize_rows([], []), do: nil
+  defp normalize_rows(_columns, rows), do: rows
 end
