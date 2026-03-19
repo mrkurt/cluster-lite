@@ -2,9 +2,9 @@ defmodule Ecto.Adapters.ClusterLite do
   @moduledoc """
   Ecto adapter for ClusterLite (SQLite over RPC).
 
-  Uses `Ecto.Adapters.SQL` with ClusterLite as the driver, delegating
-  SQL generation to ecto_sqlite3's Connection module and type handling
-  to ecto_sqlite3's Codec.
+  Reuses ecto_sqlite3 for SQL generation, type handling, and DDL.
+  Only swaps the DBConnection backend to `ClusterLite.Connection`,
+  which proxies queries to a remote node via `:rpc.call/4`.
 
   ## Configuration
 
@@ -18,17 +18,12 @@ defmodule Ecto.Adapters.ClusterLite do
   use Ecto.Adapters.SQL,
     driver: :cluster_lite
 
-  alias Ecto.Adapters.SQLite3.Codec
+  @sqlite3 Ecto.Adapters.SQLite3
 
   @impl Ecto.Adapter
-  def ensure_all_started(_config, _type) do
-    {:ok, [:cluster_lite]}
-  end
+  def ensure_all_started(_config, _type), do: {:ok, [:cluster_lite]}
 
-  # -------------------------------------------------------------------
-  # Storage callbacks (not part of a behaviour, called by Mix tasks)
-  # -------------------------------------------------------------------
-
+  # Storage — needs RPC to the remote node
   def storage_up(opts) do
     database = Keyword.fetch!(opts, :database)
     node = Keyword.get(opts, :cluster_lite_node, node())
@@ -38,8 +33,7 @@ defmodule Ecto.Adapters.ClusterLite do
         {:error, :already_up}
 
       false ->
-        dir = Path.dirname(database)
-        rpc(node, File, :mkdir_p!, [dir])
+        rpc(node, File, :mkdir_p!, [Path.dirname(database)])
 
         case rpc(node, ClusterLite.Remote.RpcApi, :start_db, [database, opts]) do
           {:ok, pid} ->
@@ -58,9 +52,7 @@ defmodule Ecto.Adapters.ClusterLite do
 
     case rpc(node, File, :exists?, [database]) do
       true ->
-        rpc(node, File, :rm, [database])
-        rpc(node, File, :rm, ["#{database}-wal"])
-        rpc(node, File, :rm, ["#{database}-shm"])
+        for ext <- ["", "-wal", "-shm"], do: rpc(node, File, :rm, [database <> ext])
         :ok
 
       false ->
@@ -71,70 +63,24 @@ defmodule Ecto.Adapters.ClusterLite do
   def storage_status(opts) do
     database = Keyword.fetch!(opts, :database)
     node = Keyword.get(opts, :cluster_lite_node, node())
-
-    case rpc(node, File, :exists?, [database]) do
-      true -> :up
-      false -> :down
-    end
+    if rpc(node, File, :exists?, [database]), do: :up, else: :down
   end
 
-  # -------------------------------------------------------------------
-  # Type handling (reuse ecto_sqlite3 Codec)
-  # -------------------------------------------------------------------
+  # Type handling — delegate to ecto_sqlite3
+  @impl Ecto.Adapter
+  defdelegate loaders(primitive, type), to: @sqlite3
 
   @impl Ecto.Adapter
-  def loaders(:boolean, type), do: [&Codec.bool_decode/1, type]
-  def loaders(:naive_datetime_usec, type), do: [&Codec.naive_datetime_decode/1, type]
-  def loaders(:time, type), do: [&Codec.time_decode/1, type]
-  def loaders(:utc_datetime_usec, type), do: [&Codec.utc_datetime_decode/1, type]
-  def loaders(:utc_datetime, type), do: [&Codec.utc_datetime_decode/1, type]
-  def loaders(:naive_datetime, type), do: [&Codec.naive_datetime_decode/1, type]
-  def loaders(:date, type), do: [&Codec.date_decode/1, type]
-  def loaders({:map, _}, type), do: [&Codec.json_decode/1, &Ecto.Type.embedded_load(type, &1, :json)]
-  def loaders({:array, _}, type), do: [&Codec.json_decode/1, type]
-  def loaders(:map, type), do: [&Codec.json_decode/1, type]
-  def loaders(:float, type), do: [&Codec.float_decode/1, type]
-  def loaders(:decimal, type), do: [&Codec.decimal_decode/1, type]
-  def loaders(:binary_id, type), do: [Ecto.UUID, type]
-  def loaders(:uuid, type), do: [Ecto.UUID, type]
-  def loaders(_primitive, type), do: [type]
-
-  @dt_type :iso8601
-
-  @impl Ecto.Adapter
-  def dumpers(:binary, type), do: [type, &Codec.blob_encode/1]
-  def dumpers(:boolean, type), do: [type, &Codec.bool_encode/1]
-  def dumpers(:decimal, type), do: [type, &Codec.decimal_encode/1]
-  def dumpers(:time, type), do: [type, &Codec.time_encode/1]
-  def dumpers(:utc_datetime, type), do: [type, &Codec.utc_datetime_encode(&1, @dt_type)]
-  def dumpers(:utc_datetime_usec, type), do: [type, &Codec.utc_datetime_encode(&1, @dt_type)]
-  def dumpers(:naive_datetime, type), do: [type, &Codec.naive_datetime_encode(&1, @dt_type)]
-  def dumpers(:naive_datetime_usec, type), do: [type, &Codec.naive_datetime_encode(&1, @dt_type)]
-  def dumpers({:array, _}, type), do: [type, &Codec.json_encode/1]
-  def dumpers({:map, _}, type), do: [&Ecto.Type.embedded_dump(type, &1, :json), &Codec.json_encode/1]
-  def dumpers(:map, type), do: [type, &Codec.json_encode/1]
-  def dumpers(_primitive, type), do: [type]
-
-  # -------------------------------------------------------------------
-  # Schema
-  # -------------------------------------------------------------------
+  defdelegate dumpers(primitive, type), to: @sqlite3
 
   @impl Ecto.Adapter.Schema
-  def autogenerate(:id), do: nil
-  def autogenerate(:embed_id), do: Ecto.UUID.generate()
-  def autogenerate(:binary_id), do: Ecto.UUID.generate()
+  defdelegate autogenerate(type), to: @sqlite3
 
   @impl Ecto.Adapter.Migration
-  def supports_ddl_transaction?, do: true
+  defdelegate supports_ddl_transaction?, to: @sqlite3
 
   @impl Ecto.Adapter.Migration
-  def lock_for_migrations(_meta, _options, fun) do
-    fun.()
-  end
-
-  # -------------------------------------------------------------------
-  # Helpers
-  # -------------------------------------------------------------------
+  def lock_for_migrations(_meta, _options, fun), do: fun.()
 
   defp rpc(node, mod, fun, args) do
     if node == node() do

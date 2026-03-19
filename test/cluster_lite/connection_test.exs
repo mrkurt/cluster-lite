@@ -1,8 +1,6 @@
 defmodule ClusterLite.ConnectionTest do
   use ExUnit.Case, async: true
 
-  alias ClusterLite.{Query, Result}
-
   setup do
     db_path = Path.join(System.tmp_dir!(), "conn_test_#{:erlang.unique_integer([:positive])}.db")
 
@@ -27,11 +25,11 @@ defmodule ClusterLite.ConnectionTest do
     {:ok, _} = ClusterLite.query(conn, "INSERT INTO items (name) VALUES (?)", ["widget"])
     {:ok, result} = ClusterLite.query(conn, "SELECT name FROM items")
 
-    assert %Result{columns: ["name"], rows: [["widget"]], num_rows: 1} = result
+    assert %Exqlite.Result{columns: ["name"], rows: [["widget"]], num_rows: 1} = result
   end
 
   test "query! raises on error", %{conn: conn} do
-    assert_raise ClusterLite.Error, fn ->
+    assert_raise Exqlite.Error, fn ->
       ClusterLite.query!(conn, "SELECT * FROM nonexistent_table")
     end
   end
@@ -40,7 +38,7 @@ defmodule ClusterLite.ConnectionTest do
     ClusterLite.query!(conn, "CREATE TABLE t (val TEXT)")
     {:ok, query} = ClusterLite.prepare(conn, "ins", "INSERT INTO t VALUES (?)")
 
-    assert %Query{command: :insert} = query
+    assert %Exqlite.Query{} = query
 
     {:ok, _query, _result} = ClusterLite.execute(conn, query, ["hello"])
     {:ok, result} = ClusterLite.query(conn, "SELECT val FROM t")
@@ -81,15 +79,5 @@ defmodule ClusterLite.ConnectionTest do
 
     {:ok, result} = ClusterLite.query(conn, "SELECT COUNT(*) FROM nums")
     assert result.rows == [[10]]
-  end
-
-  test "command detection", %{conn: conn} do
-    ClusterLite.query!(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
-
-    {:ok, result} = ClusterLite.query(conn, "SELECT 1")
-    assert result.command == :select
-
-    {:ok, result} = ClusterLite.query(conn, "INSERT INTO t VALUES (1)")
-    assert result.command == :insert
   end
 end

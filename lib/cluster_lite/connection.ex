@@ -3,14 +3,12 @@ defmodule ClusterLite.Connection do
   DBConnection implementation that proxies operations to a remote
   ClusterLite.Remote.DbServer via `:rpc.call/4`.
 
-  Every SQL operation becomes a single `query` RPC call. The remote
-  DbServer wraps an Exqlite DBConnection pool that handles all NIF
-  management, statement lifecycle, and pragma configuration.
+  Accepts `Exqlite.Query` structs and returns `Exqlite.Result` structs,
+  so ecto_sqlite3's SQL.Connection module can drive it directly.
   """
 
   @behaviour DBConnection
 
-  alias ClusterLite.{Error, Query, Result}
   alias ClusterLite.Remote.RpcApi
 
   defstruct [
@@ -23,10 +21,6 @@ defmodule ClusterLite.Connection do
   ]
 
   @rpc_timeout 15_000
-
-  # -------------------------------------------------------------------
-  # DBConnection callbacks
-  # -------------------------------------------------------------------
 
   @impl true
   def connect(opts) do
@@ -49,7 +43,7 @@ defmodule ClusterLite.Connection do
         {:ok, state}
 
       {:error, reason} ->
-        {:error, %Error{message: "failed to start remote db: #{inspect(reason)}"}}
+        {:error, %Exqlite.Error{message: "failed to start remote db: #{inspect(reason)}"}}
     end
   end
 
@@ -67,25 +61,21 @@ defmodule ClusterLite.Connection do
   def ping(state) do
     case rpc_call(state.node, RpcApi, :ping, [state.pid]) do
       :ok -> {:ok, state}
-      {:error, reason} -> {:disconnect, %Error{message: inspect(reason)}, state}
+      {:error, reason} -> {:disconnect, %Exqlite.Error{message: inspect(reason)}, state}
     end
   end
 
   @impl true
-  def handle_prepare(%Query{statement: sql} = query, _opts, state) do
+  def handle_prepare(%{statement: sql} = query, _opts, state) do
     sql = to_sql_string(sql)
-    command = Query.command_from_sql(sql)
-    {:ok, %{query | statement: sql, command: command}, state}
+    {:ok, %{query | statement: sql}, state}
   end
 
   @impl true
-  def handle_execute(%Query{statement: sql} = query, params, _opts, state) do
-    command = query.command || Query.command_from_sql(sql)
-
+  def handle_execute(%{statement: sql} = query, params, _opts, state) do
     case rpc_call(state.node, RpcApi, :query, [state.pid, sql, params]) do
       {:ok, {columns, rows, num_rows}} ->
-        result = %Result{
-          command: command,
+        result = %Exqlite.Result{
           columns: columns,
           rows: rows,
           num_rows: num_rows
@@ -94,14 +84,12 @@ defmodule ClusterLite.Connection do
         {:ok, query, result, state}
 
       {:error, reason} ->
-        {:error, %Error{message: to_string(reason), statement: sql}, state}
+        {:error, %Exqlite.Error{message: to_string(reason), statement: sql}, state}
     end
   end
 
   @impl true
-  def handle_close(_query, _opts, state) do
-    {:ok, nil, state}
-  end
+  def handle_close(_query, _opts, state), do: {:ok, nil, state}
 
   @impl true
   def handle_begin(_opts, state) do
@@ -114,43 +102,32 @@ defmodule ClusterLite.Connection do
       end
 
     case rpc_call(state.node, RpcApi, :query, [state.pid, mode, []]) do
-      {:ok, _} ->
-        {:ok, nil, %{state | transaction_status: :transaction}}
-
-      {:error, reason} ->
-        {:error, %Error{message: to_string(reason)}, state}
+      {:ok, _} -> {:ok, nil, %{state | transaction_status: :transaction}}
+      {:error, reason} -> {:error, %Exqlite.Error{message: to_string(reason)}, state}
     end
   end
 
   @impl true
   def handle_commit(_opts, state) do
     case rpc_call(state.node, RpcApi, :query, [state.pid, "COMMIT", []]) do
-      {:ok, _} ->
-        {:ok, nil, %{state | transaction_status: :idle}}
-
-      {:error, reason} ->
-        {:error, %Error{message: to_string(reason)}, state}
+      {:ok, _} -> {:ok, nil, %{state | transaction_status: :idle}}
+      {:error, reason} -> {:error, %Exqlite.Error{message: to_string(reason)}, state}
     end
   end
 
   @impl true
   def handle_rollback(_opts, state) do
     case rpc_call(state.node, RpcApi, :query, [state.pid, "ROLLBACK", []]) do
-      {:ok, _} ->
-        {:ok, nil, %{state | transaction_status: :idle}}
-
-      {:error, reason} ->
-        {:error, %Error{message: to_string(reason)}, state}
+      {:ok, _} -> {:ok, nil, %{state | transaction_status: :idle}}
+      {:error, reason} -> {:error, %Exqlite.Error{message: to_string(reason)}, state}
     end
   end
 
   @impl true
-  def handle_status(_opts, state) do
-    {state.transaction_status, state}
-  end
+  def handle_status(_opts, state), do: {state.transaction_status, state}
 
   @impl true
-  def handle_declare(%Query{statement: sql} = query, params, _opts, state) do
+  def handle_declare(%{statement: sql} = query, params, _opts, state) do
     {:ok, query, {sql, params}, state}
   end
 
@@ -158,41 +135,29 @@ defmodule ClusterLite.Connection do
   def handle_fetch(_query, {sql, params}, _opts, state) do
     case rpc_call(state.node, RpcApi, :query, [state.pid, sql, params]) do
       {:ok, {columns, rows, num_rows}} ->
-        result = %Result{columns: columns, rows: rows, num_rows: num_rows}
-        {:halt, result, state}
+        {:halt, %Exqlite.Result{columns: columns, rows: rows, num_rows: num_rows}, state}
 
       {:error, reason} ->
-        {:error, %Error{message: to_string(reason)}, state}
+        {:error, %Exqlite.Error{message: to_string(reason)}, state}
     end
   end
 
   @impl true
-  def handle_deallocate(_query, _cursor, _opts, state) do
-    {:ok, nil, state}
-  end
+  def handle_deallocate(_query, _cursor, _opts, state), do: {:ok, nil, state}
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{monitor_ref: ref} = state) do
-    {:disconnect, %Error{message: "remote DbServer down: #{inspect(reason)}"}, state}
+    {:disconnect, %Exqlite.Error{message: "remote DbServer down: #{inspect(reason)}"}, state}
   end
 
-  def handle_info(_msg, state) do
-    {:ok, state}
-  end
-
-  # -------------------------------------------------------------------
-  # Helpers
-  # -------------------------------------------------------------------
+  def handle_info(_msg, state), do: {:ok, state}
 
   defp rpc_call(node, mod, fun, args) do
     if node == node() do
       apply(mod, fun, args)
     else
       case :rpc.call(node, mod, fun, args, @rpc_timeout) do
-        {:badrpc, reason} ->
-          {:error, "RPC failed: #{inspect(reason)}"}
-
-        result ->
-          result
+        {:badrpc, reason} -> {:error, "RPC failed: #{inspect(reason)}"}
+        result -> result
       end
     end
   end

@@ -52,7 +52,7 @@ defmodule ClusterLite.Remote.DbServer do
   end
 
   def handle_call({:query, sql, params}, _from, state) do
-    command = ClusterLite.Query.command_from_sql(sql)
+    command = command_from_sql(sql)
     query = %Exqlite.Query{statement: sql, command: command}
 
     case DBConnection.prepare_execute(state.conn, query, params, command: command) do
@@ -61,6 +61,17 @@ defmodule ClusterLite.Remote.DbServer do
 
       {:error, err} ->
         {:reply, {:error, format_error(err)}, state}
+    end
+  end
+
+  defp command_from_sql(sql) do
+    case sql |> String.trim_leading() |> String.split(~r/\s/, parts: 2) |> hd() |> String.downcase() do
+      "select" -> :select
+      "insert" -> :insert
+      "update" -> :update
+      "delete" -> :delete
+      "with" -> :select
+      _ -> :execute
     end
   end
 
