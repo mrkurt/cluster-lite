@@ -22,83 +22,44 @@ defmodule ClusterLite.Remote.DbServerTest do
     assert :ok = GenServer.call(pid, :ping)
   end
 
-  test "prepare and execute", %{pid: pid} do
-    GenServer.call(pid, {:prepare_and_execute, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)", []})
+  test "create table, insert, and select", %{pid: pid} do
+    {:ok, _} = GenServer.call(pid, {:query, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)", []})
 
-    {:ok, stmt_id} = GenServer.call(pid, {:prepare, "INSERT INTO test (name) VALUES (?)"})
-    assert is_integer(stmt_id)
+    {:ok, {_, _, 1}} = GenServer.call(pid, {:query, "INSERT INTO test (name) VALUES (?)", ["alice"]})
+    {:ok, {_, _, 1}} = GenServer.call(pid, {:query, "INSERT INTO test (name) VALUES (?)", ["bob"]})
 
-    {:ok, [], [], 1} = GenServer.call(pid, {:execute, stmt_id, ["alice"]})
-    {:ok, [], [], 1} = GenServer.call(pid, {:execute, stmt_id, ["bob"]})
-
-    {:ok, _stmt_id2, columns, rows, _changes} =
-      GenServer.call(pid, {:prepare_and_execute, "SELECT name FROM test ORDER BY name", []})
+    {:ok, {columns, rows, 2}} =
+      GenServer.call(pid, {:query, "SELECT name FROM test ORDER BY name", []})
 
     assert columns == ["name"]
     assert rows == [["alice"], ["bob"]]
   end
 
-  test "close statement", %{pid: pid} do
-    GenServer.call(pid, {:prepare_and_execute, "CREATE TABLE t (id INTEGER PRIMARY KEY)", []})
-    {:ok, stmt_id} = GenServer.call(pid, {:prepare, "SELECT 1"})
-    assert :ok = GenServer.call(pid, {:close_statement, stmt_id})
-    # closing again is idempotent
-    assert :ok = GenServer.call(pid, {:close_statement, stmt_id})
-  end
+  test "transaction via raw SQL", %{pid: pid} do
+    GenServer.call(pid, {:query, "CREATE TABLE t (val TEXT)", []})
 
-  test "transaction begin/commit/rollback", %{pid: pid} do
-    GenServer.call(pid, {:prepare_and_execute, "CREATE TABLE t (val TEXT)", []})
+    GenServer.call(pid, {:query, "BEGIN", []})
+    GenServer.call(pid, {:query, "INSERT INTO t VALUES ('a')", []})
+    GenServer.call(pid, {:query, "COMMIT", []})
 
-    assert :idle = GenServer.call(pid, :transaction_status)
+    GenServer.call(pid, {:query, "BEGIN", []})
+    GenServer.call(pid, {:query, "INSERT INTO t VALUES ('b')", []})
+    GenServer.call(pid, {:query, "ROLLBACK", []})
 
-    :ok = GenServer.call(pid, {:begin, :deferred})
-    assert :transaction = GenServer.call(pid, :transaction_status)
-
-    GenServer.call(pid, {:prepare_and_execute, "INSERT INTO t VALUES ('a')", []})
-    :ok = GenServer.call(pid, :commit)
-    assert :idle = GenServer.call(pid, :transaction_status)
-
-    :ok = GenServer.call(pid, {:begin, :deferred})
-    GenServer.call(pid, {:prepare_and_execute, "INSERT INTO t VALUES ('b')", []})
-    :ok = GenServer.call(pid, {:rollback, nil})
-    assert :idle = GenServer.call(pid, :transaction_status)
-
-    {:ok, _sid, _cols, rows, _changes} = GenServer.call(pid, {:prepare_and_execute, "SELECT val FROM t", []})
+    {:ok, {_cols, rows, _n}} = GenServer.call(pid, {:query, "SELECT val FROM t", []})
     assert rows == [["a"]]
   end
 
-  test "changes", %{pid: pid} do
-    GenServer.call(pid, {:prepare_and_execute, "CREATE TABLE t (val TEXT)", []})
-    GenServer.call(pid, {:prepare_and_execute, "INSERT INTO t VALUES ('x')", []})
-    assert {:ok, 1} = GenServer.call(pid, :changes)
-  end
+  test "update returns affected count", %{pid: pid} do
+    GenServer.call(pid, {:query, "CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)", []})
+    GenServer.call(pid, {:query, "INSERT INTO t VALUES (1, 'x')", []})
+    GenServer.call(pid, {:query, "INSERT INTO t VALUES (2, 'y')", []})
 
-  test "cursor operations", %{pid: pid} do
-    GenServer.call(pid, {:prepare_and_execute, "CREATE TABLE nums (n INTEGER)", []})
-
-    for i <- 1..5 do
-      GenServer.call(pid, {:prepare_and_execute, "INSERT INTO nums VALUES (?)", [i]})
-    end
-
-    {:ok, cursor_id} = GenServer.call(pid, {:declare_cursor, "SELECT n FROM nums ORDER BY n", [], 2})
-
-    {:ok, ["n"], rows1, :cont} = GenServer.call(pid, {:fetch_cursor, cursor_id, 2})
-    assert length(rows1) == 2
-
-    {:ok, ["n"], rows2, :cont} = GenServer.call(pid, {:fetch_cursor, cursor_id, 2})
-    assert length(rows2) == 2
-
-    {:ok, ["n"], rows3, :halt} = GenServer.call(pid, {:fetch_cursor, cursor_id, 2})
-    assert length(rows3) == 1
-
-    all_vals = Enum.flat_map(rows1 ++ rows2 ++ rows3, & &1)
-    assert all_vals == [1, 2, 3, 4, 5]
-
-    assert :ok = GenServer.call(pid, {:deallocate_cursor, cursor_id})
+    {:ok, {_, _, 2}} = GenServer.call(pid, {:query, "UPDATE t SET val = 'z'", []})
   end
 
   test "error on invalid SQL", %{pid: pid} do
-    {:error, msg} = GenServer.call(pid, {:prepare, "INVALID SQL STATEMENT"})
+    {:error, msg} = GenServer.call(pid, {:query, "INVALID SQL STATEMENT", []})
     assert is_binary(msg)
   end
 end

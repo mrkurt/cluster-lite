@@ -1,21 +1,16 @@
 defmodule ClusterLite.Query do
   @moduledoc """
   Query struct for ClusterLite.
-
-  Uses integer `ref` (stmt_id) instead of NIF references so queries
-  are serializable across node boundaries.
   """
 
   @type t :: %__MODULE__{
-          statement: String.t(),
+          statement: iodata(),
           name: String.t(),
-          ref: integer() | nil,
           command: atom()
         }
 
   defstruct statement: nil,
             name: "",
-            ref: nil,
             command: nil
 
   @doc false

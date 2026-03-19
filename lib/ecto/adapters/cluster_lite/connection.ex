@@ -38,10 +38,9 @@ defmodule Ecto.Adapters.ClusterLite.Connection do
   end
 
   @impl true
-  def execute(conn, %Query{ref: ref} = query, params, options) when ref != nil do
-    case DBConnection.execute(conn, query, params, options) do
+  def execute(conn, %Query{} = query, params, options) do
+    case DBConnection.prepare_execute(conn, query, params, options) do
       {:ok, _query, result} -> {:ok, result}
-      {:ok, result} -> {:ok, result}
       {:error, err} -> raise_or_error(err)
     end
   end
@@ -49,13 +48,6 @@ defmodule Ecto.Adapters.ClusterLite.Connection do
   def execute(conn, sql, params, options) when is_binary(sql) do
     query = %Query{statement: sql}
 
-    case DBConnection.prepare_execute(conn, query, params, options) do
-      {:ok, _query, result} -> {:ok, result}
-      {:error, err} -> raise_or_error(err)
-    end
-  end
-
-  def execute(conn, %Query{} = query, params, options) do
     case DBConnection.prepare_execute(conn, query, params, options) do
       {:ok, _query, result} -> {:ok, result}
       {:error, err} -> raise_or_error(err)

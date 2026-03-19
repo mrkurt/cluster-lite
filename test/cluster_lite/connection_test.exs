@@ -40,8 +40,7 @@ defmodule ClusterLite.ConnectionTest do
     ClusterLite.query!(conn, "CREATE TABLE t (val TEXT)")
     {:ok, query} = ClusterLite.prepare(conn, "ins", "INSERT INTO t VALUES (?)")
 
-    assert %Query{ref: ref} = query
-    assert is_integer(ref)
+    assert %Query{command: :insert} = query
 
     {:ok, _query, _result} = ClusterLite.execute(conn, query, ["hello"])
     {:ok, result} = ClusterLite.query(conn, "SELECT val FROM t")
