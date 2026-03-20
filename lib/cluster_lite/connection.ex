@@ -3,8 +3,10 @@ defmodule ClusterLite.Connection do
   DBConnection implementation that proxies operations to a remote
   ClusterLite.Remote.DbServer via `:rpc.call/4`.
 
-  Accepts `Exqlite.Query` structs and returns `Exqlite.Result` structs,
-  so ecto_sqlite3's SQL.Connection module can drive it directly.
+  Each local connection gets its own `conn_id` on the remote DbServer,
+  mapping to a dedicated pool_size:1 Exqlite DBConnection. This allows
+  multiple concurrent connections (concurrent WAL reads) while keeping
+  transaction state isolated per connection.
   """
 
   @behaviour DBConnection
@@ -14,6 +16,7 @@ defmodule ClusterLite.Connection do
   defstruct [
     :node,
     :pid,
+    :conn_id,
     :path,
     :monitor_ref,
     :config,
@@ -27,30 +30,31 @@ defmodule ClusterLite.Connection do
     node = Keyword.get(opts, :cluster_lite_node, node())
     path = Keyword.fetch!(opts, :database)
 
-    case rpc_call(node, RpcApi, :start_db, [path, opts]) do
-      {:ok, pid} ->
-        ref = Process.monitor(pid)
+    with {:ok, pid} <- get_or_start_db(node, path, opts),
+         {:ok, conn_id} <- rpc_call(node, RpcApi, :open_conn, [pid]) do
+      ref = Process.monitor(pid)
 
-        state = %__MODULE__{
-          node: node,
-          pid: pid,
-          path: path,
-          monitor_ref: ref,
-          config: opts,
-          transaction_status: :idle
-        }
+      state = %__MODULE__{
+        node: node,
+        pid: pid,
+        conn_id: conn_id,
+        path: path,
+        monitor_ref: ref,
+        config: opts,
+        transaction_status: :idle
+      }
 
-        {:ok, state}
-
+      {:ok, state}
+    else
       {:error, reason} ->
-        {:error, %Exqlite.Error{message: "failed to start remote db: #{inspect(reason)}"}}
+        {:error, %Exqlite.Error{message: "failed to connect: #{inspect(reason)}"}}
     end
   end
 
   @impl true
   def disconnect(_err, state) do
     Process.demonitor(state.monitor_ref, [:flush])
-    rpc_call(state.node, RpcApi, :stop_db, [state.pid])
+    rpc_call(state.node, RpcApi, :close_conn, [state.pid, state.conn_id])
     :ok
   end
 
@@ -73,14 +77,9 @@ defmodule ClusterLite.Connection do
 
   @impl true
   def handle_execute(%{statement: sql} = query, params, _opts, state) do
-    case rpc_call(state.node, RpcApi, :query, [state.pid, sql, params]) do
+    case rpc_call(state.node, RpcApi, :query, [state.pid, state.conn_id, sql, params]) do
       {:ok, {columns, rows, num_rows}} ->
-        result = %Exqlite.Result{
-          columns: columns,
-          rows: rows,
-          num_rows: num_rows
-        }
-
+        result = %Exqlite.Result{columns: columns, rows: rows, num_rows: num_rows}
         {:ok, query, result, state}
 
       {:error, reason} ->
@@ -101,7 +100,7 @@ defmodule ClusterLite.Connection do
         _ -> "BEGIN"
       end
 
-    case rpc_call(state.node, RpcApi, :query, [state.pid, mode, []]) do
+    case rpc_call(state.node, RpcApi, :query, [state.pid, state.conn_id, mode, []]) do
       {:ok, _} -> {:ok, nil, %{state | transaction_status: :transaction}}
       {:error, reason} -> {:error, %Exqlite.Error{message: to_string(reason)}, state}
     end
@@ -109,7 +108,7 @@ defmodule ClusterLite.Connection do
 
   @impl true
   def handle_commit(_opts, state) do
-    case rpc_call(state.node, RpcApi, :query, [state.pid, "COMMIT", []]) do
+    case rpc_call(state.node, RpcApi, :query, [state.pid, state.conn_id, "COMMIT", []]) do
       {:ok, _} -> {:ok, nil, %{state | transaction_status: :idle}}
       {:error, reason} -> {:error, %Exqlite.Error{message: to_string(reason)}, state}
     end
@@ -117,7 +116,7 @@ defmodule ClusterLite.Connection do
 
   @impl true
   def handle_rollback(_opts, state) do
-    case rpc_call(state.node, RpcApi, :query, [state.pid, "ROLLBACK", []]) do
+    case rpc_call(state.node, RpcApi, :query, [state.pid, state.conn_id, "ROLLBACK", []]) do
       {:ok, _} -> {:ok, nil, %{state | transaction_status: :idle}}
       {:error, reason} -> {:error, %Exqlite.Error{message: to_string(reason)}, state}
     end
@@ -133,7 +132,7 @@ defmodule ClusterLite.Connection do
 
   @impl true
   def handle_fetch(_query, {sql, params}, _opts, state) do
-    case rpc_call(state.node, RpcApi, :query, [state.pid, sql, params]) do
+    case rpc_call(state.node, RpcApi, :query, [state.pid, state.conn_id, sql, params]) do
       {:ok, {columns, rows, num_rows}} ->
         {:halt, %Exqlite.Result{columns: columns, rows: rows, num_rows: num_rows}, state}
 
@@ -150,6 +149,16 @@ defmodule ClusterLite.Connection do
   end
 
   def handle_info(_msg, state), do: {:ok, state}
+
+  # -------------------------------------------------------------------
+  # Helpers
+  # -------------------------------------------------------------------
+
+  defp get_or_start_db(node, path, opts) do
+    # TODO: Registry-based lookup to share DbServer across connections
+    # to the same path. For now, each connection starts its own DbServer.
+    rpc_call(node, RpcApi, :start_db, [path, opts])
+  end
 
   defp rpc_call(node, mod, fun, args) do
     if node == node() do

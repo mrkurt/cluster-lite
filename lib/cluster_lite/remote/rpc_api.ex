@@ -21,8 +21,11 @@ defmodule ClusterLite.Remote.RpcApi do
     DynamicSupervisor.terminate_child(ClusterLite.Remote.DynamicSupervisor, pid)
   end
 
+  def open_conn(pid), do: GenServer.call(pid, :open_conn, @timeout)
+  def close_conn(pid, conn_id), do: GenServer.call(pid, {:close_conn, conn_id}, @timeout)
+
   def ping(pid), do: GenServer.call(pid, :ping, @timeout)
 
-  def query(pid, sql, params \\ []),
-    do: GenServer.call(pid, {:query, sql, params}, @timeout)
+  def query(pid, conn_id, sql, params \\ []),
+    do: GenServer.call(pid, {:query, conn_id, sql, params}, @timeout)
 end
